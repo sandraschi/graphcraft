@@ -1,0 +1,19 @@
+[package]
+name = "graphcraft-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "L3 pure-Rust egui/eframe native GPU desktop application for GraphCraft."
+
+[lints]
+workspace = true
+
+[dependencies]
+graphcraft-core = { path = "../graphcraft-core" }
+eframe.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+egui_kittest.workspace = true
