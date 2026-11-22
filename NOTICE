@@ -1,0 +1,14 @@
+GraphCraft
+Copyright (c) 2026 Sandra Schipal
+
+This project is dual-licensed under the MIT License or the Apache License, Version 2.0,
+at your option.
+
+Non-Affiliation Notice:
+GraphCraft is an independent clean-room open-source desktop application and MCP server.
+It is not affiliated with, endorsed by, or sponsored by Obsidian, Dynalist Inc.,
+TheBrain Technologies, Neo4j Inc., Gephi, Cytoscape, or Storytold / ArtCraft, except where
+explicitly submitted as an independent community contribution.
+
+All third-party file formats (such as Graphviz DOT, Mermaid, and Gephi GEXF) are
+referenced strictly for factual data interoperability.
