@@ -1,0 +1,18 @@
+[package]
+name = "graphcraft-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "L1 pure-Rust graph engine, algorithms, physics layouts, and universal command bus for GraphCraft."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+petgraph.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
