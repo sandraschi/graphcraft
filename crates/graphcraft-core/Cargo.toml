@@ -16,3 +16,4 @@ petgraph.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+rusqlite.workspace = true

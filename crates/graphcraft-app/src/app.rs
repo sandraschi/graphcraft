@@ -6,13 +6,21 @@ use graphcraft_core::layout::step_force_directed;
 use graphcraft_core::model::NodeKind;
 use graphcraft_core::{dispatch, Command, GraphEngine};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveTab {
     Canvas,
     Table,
     Export,
+    Chat,
     Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppLocale {
+    English,
+    Deutsch,
 }
 
 pub struct GraphCraftApp {
@@ -48,16 +56,41 @@ pub struct GraphCraftApp {
     export_preview: String,
 
     // Status / modals
+    db_path: Option<PathBuf>,
     status_message: String,
+    locale: AppLocale,
+    help_tab: usize,
     show_about: bool,
+    show_licenses: bool,
     show_shortcuts: bool,
     show_command_palette: bool,
     palette_filter: String,
+    chat_model: String,
+    chat_prompt: String,
+    chat_log: Vec<String>,
 }
 
 impl GraphCraftApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let app = Self::new_headless();
+    pub fn new_with_db(cc: &eframe::CreationContext<'_>, db_path: PathBuf) -> Self {
+        let (engine, status_message) = match GraphEngine::open_or_seed(&db_path) {
+            Ok(eng) => (eng, format!("Ready - DB: {}", db_path.display())),
+            Err(err) => (
+                GraphEngine::new_with_demo(),
+                format!("DB open error ({err}); running in-memory"),
+            ),
+        };
+        let stats = compute_stats(&engine.doc);
+        let pagerank_map = compute_pagerank(&engine.doc, 0.85, 25)
+            .into_iter()
+            .map(|s| (s.id, s.score))
+            .collect();
+
+        let mut app = Self::new_headless();
+        app.engine = engine;
+        app.stats = stats;
+        app.pagerank_map = pagerank_map;
+        app.db_path = Some(db_path);
+        app.status_message = status_message;
         apply_theme(&cc.egui_ctx, app.light_mode);
         app
     }
@@ -94,10 +127,17 @@ impl GraphCraftApp {
             export_format: "mermaid".into(),
             export_preview: String::new(),
             status_message: "Ready - Pure-Rust GraphCraft Workspace".into(),
+            db_path: None,
+            locale: AppLocale::English,
+            help_tab: 0,
             show_about: false,
+            show_licenses: false,
             show_shortcuts: false,
             show_command_palette: false,
             palette_filter: String::new(),
+            chat_model: String::new(),
+            chat_prompt: String::new(),
+            chat_log: Vec::new(),
         }
     }
 
@@ -109,11 +149,21 @@ impl GraphCraftApp {
             .collect();
     }
 
+    fn persist_db(&mut self) {
+        if let Some(ref path) = self.db_path {
+            if let Err(err) = self.engine.save_db(path) {
+                self.status_message = format!("DB save error: {err}");
+            }
+        }
+    }
+
     pub fn run_cmd(&mut self, cmd: Command) -> serde_json::Value {
         let res = dispatch(&mut self.engine, cmd);
         self.refresh_analytics();
         if let Some(err) = res["error"].as_str() {
             self.status_message = format!("Error: {err}");
+        } else if res["ok"].as_bool() == Some(true) {
+            self.persist_db();
         }
         res
     }
@@ -191,6 +241,7 @@ impl GraphCraftApp {
                 NodeKind::Cluster => Color32::from_rgb(126, 34, 206), // Purple 700
                 NodeKind::Document => Color32::from_rgb(190, 18, 60), // Rose 700
                 NodeKind::Concept => Color32::from_rgb(51, 65, 85),  // Slate 700
+                NodeKind::Drawer => Color32::from_rgb(13, 148, 136), // Teal 600
             }
         } else {
             match kind {
@@ -200,8 +251,43 @@ impl GraphCraftApp {
                 NodeKind::Cluster => Color32::from_rgb(192, 132, 252), // Purple 400
                 NodeKind::Document => Color32::from_rgb(251, 113, 133), // Rose 400
                 NodeKind::Concept => Color32::from_rgb(148, 163, 184), // Slate 400
+                NodeKind::Drawer => Color32::from_rgb(45, 212, 191),   // Teal 400
             }
         }
+    }
+
+    fn drawer_lines(notes: &str) -> Vec<&str> {
+        notes
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    fn drawer_screen_rect(&self, sp: Pos2, node: &graphcraft_core::model::GraphNode) -> egui::Rect {
+        let lines = Self::drawer_lines(&node.notes);
+        let visible_rows = lines.len().clamp(1, 8);
+        let w = 164.0 * self.zoom;
+        let h = (34.0 + visible_rows as f32 * 14.5 + if lines.len() > 8 { 14.0 } else { 4.0 })
+            * self.zoom;
+        egui::Rect::from_center_size(sp, Vec2::new(w, h))
+    }
+
+    fn hit_test_node(&self, center: Pos2, mouse: Pos2) -> Option<String> {
+        self.engine
+            .doc
+            .nodes
+            .iter()
+            .rev()
+            .find(|n| {
+                let sp = self.world_to_screen(center, n.pos);
+                if n.kind == NodeKind::Drawer {
+                    self.drawer_screen_rect(sp, n).contains(mouse)
+                } else {
+                    sp.distance(mouse) <= 24.0 * self.zoom
+                }
+            })
+            .map(|n| n.id.clone())
     }
 
     fn render_menu_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
@@ -265,19 +351,72 @@ impl GraphCraftApp {
                     ui.close();
                 }
                 ui.separator();
-                let theme_label = if self.light_mode {
-                    "Switch to Dark Mode"
-                } else {
-                    "Switch to Light Mode"
-                };
-                if ui.button(theme_label).clicked() {
-                    self.light_mode = !self.light_mode;
+                if ui.button("Dark").clicked() {
+                    self.light_mode = false;
                     apply_theme(ctx, self.light_mode);
+                    ui.close();
+                }
+                if ui.button("Light").clicked() {
+                    self.light_mode = true;
+                    apply_theme(ctx, self.light_mode);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("English").clicked() {
+                    self.locale = AppLocale::English;
+                    self.status_message = "Language: English".into();
+                    ui.close();
+                }
+                if ui.button("Deutsch").clicked() {
+                    self.locale = AppLocale::Deutsch;
+                    self.status_message = "Sprache: Deutsch".into();
                     ui.close();
                 }
             });
 
-            ui.menu_button("Graph", |ui| {
+            ui.menu_button("Insert", |ui| {
+                if ui.button("New Concept Node").clicked() {
+                    let next_idx = self.engine.doc.nodes.len() + 1;
+                    let _ = self.run_cmd(Command::AddNode {
+                        id: None,
+                        label: format!("Node {next_idx}"),
+                        kind: Some(NodeKind::Concept),
+                        notes: None,
+                        tags: None,
+                        x: Some(0.0),
+                        y: Some(0.0),
+                    });
+                    ui.close();
+                }
+                if ui.button("New Project Node").clicked() {
+                    let next_idx = self.engine.doc.nodes.len() + 1;
+                    let _ = self.run_cmd(Command::AddNode {
+                        id: None,
+                        label: format!("Project {next_idx}"),
+                        kind: Some(NodeKind::Project),
+                        notes: None,
+                        tags: None,
+                        x: Some(40.0),
+                        y: Some(40.0),
+                    });
+                    ui.close();
+                }
+                if ui.button("New Drawer Node").clicked() {
+                    let next_idx = self.engine.doc.nodes.len() + 1;
+                    let _ = self.run_cmd(Command::AddNode {
+                        id: None,
+                        label: format!("Drawer {next_idx}"),
+                        kind: Some(NodeKind::Drawer),
+                        notes: Some("item 1\nitem 2\nitem 3".into()),
+                        tags: Some(vec!["drawer".into()]),
+                        x: Some(-40.0),
+                        y: Some(40.0),
+                    });
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("Modify", |ui| {
                 if ui.button("Run Force Physics (30 steps)").clicked() {
                     let _ = self.run_cmd(Command::RunLayout {
                         mode: "force".into(),
@@ -299,6 +438,58 @@ impl GraphCraftApp {
                     });
                     ui.close();
                 }
+                ui.separator();
+                if ui.button("Toggle Live Physics").clicked() {
+                    self.physics_running = !self.physics_running;
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("Commands", |ui| {
+                if ui.button("Command Palette (Ctrl+K)").clicked() {
+                    self.show_command_palette = true;
+                    ui.close();
+                }
+                if ui.button("Compute PageRank").clicked() {
+                    let _ = self.run_cmd(Command::ComputePagerank {
+                        damping: Some(0.85),
+                        iterations: Some(25),
+                    });
+                    self.status_message = "Recomputed PageRank centrality.".into();
+                    ui.close();
+                }
+                if ui.button("Refresh Stats").clicked() {
+                    let _ = self.run_cmd(Command::ComputeStats);
+                    self.status_message = format!(
+                        "Stats: {} nodes, {} edges.",
+                        self.stats.node_count, self.stats.edge_count
+                    );
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("Window", |ui| {
+                if ui.button("Canvas").clicked() {
+                    self.active_tab = ActiveTab::Canvas;
+                    ui.close();
+                }
+                if ui.button("Nodes").clicked() {
+                    self.active_tab = ActiveTab::Table;
+                    ui.close();
+                }
+                if ui.button("Export").clicked() {
+                    self.active_tab = ActiveTab::Export;
+                    self.refresh_export_preview();
+                    ui.close();
+                }
+                if ui.button("Chat").clicked() {
+                    self.active_tab = ActiveTab::Chat;
+                    ui.close();
+                }
+                if ui.button("Help").clicked() {
+                    self.active_tab = ActiveTab::Help;
+                    ui.close();
+                }
             });
 
             ui.menu_button("Help", |ui| {
@@ -310,11 +501,15 @@ impl GraphCraftApp {
                     self.show_shortcuts = true;
                     ui.close();
                 }
-                if ui.button("Project Files & Docs").clicked() {
+                if ui.button("Documentation (F1)").clicked() {
                     self.active_tab = ActiveTab::Help;
                     ui.close();
                 }
                 ui.separator();
+                if ui.button("Licenses").clicked() {
+                    self.show_licenses = true;
+                    ui.close();
+                }
                 if ui.button("About GraphCraft").clicked() {
                     self.show_about = true;
                     ui.close();
@@ -343,14 +538,23 @@ impl GraphCraftApp {
     }
 
     fn render_left_sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Graph Studio");
+        let studio_title = match self.locale {
+            AppLocale::English => "Graph Studio",
+            AppLocale::Deutsch => "Graphen-Studio",
+        };
+        ui.heading(studio_title);
         ui.add_space(4.0);
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.active_tab, ActiveTab::Canvas, "Canvas");
             ui.selectable_value(&mut self.active_tab, ActiveTab::Table, "Nodes");
             ui.selectable_value(&mut self.active_tab, ActiveTab::Export, "Export");
-            ui.selectable_value(&mut self.active_tab, ActiveTab::Help, "Help");
+            ui.selectable_value(&mut self.active_tab, ActiveTab::Chat, "Chat");
+            let help_lbl = match self.locale {
+                AppLocale::English => "Help",
+                AppLocale::Deutsch => "Hilfe",
+            };
+            ui.selectable_value(&mut self.active_tab, ActiveTab::Help, help_lbl);
         });
         ui.separator();
 
@@ -695,13 +899,9 @@ impl GraphCraftApp {
         let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
         if response.drag_started_by(egui::PointerButton::Primary) {
             if let Some(mouse) = pointer_pos {
-                let hit = self.engine.doc.nodes.iter().rev().find(|n| {
-                    let sp = self.world_to_screen(center, n.pos);
-                    sp.distance(mouse) <= 24.0 * self.zoom
-                });
-                if let Some(n) = hit {
-                    self.dragging_node_id = Some(n.id.clone());
-                    self.selected_node_id = Some(n.id.clone());
+                if let Some(hit_id) = self.hit_test_node(center, mouse) {
+                    self.dragging_node_id = Some(hit_id.clone());
+                    self.selected_node_id = Some(hit_id);
                 } else {
                     self.dragging_node_id = None;
                 }
@@ -721,16 +921,15 @@ impl GraphCraftApp {
         }
 
         if response.drag_stopped() {
+            if self.dragging_node_id.is_some() {
+                self.persist_db();
+            }
             self.dragging_node_id = None;
         }
 
         if response.clicked() {
             if let Some(mouse) = pointer_pos {
-                let hit = self.engine.doc.nodes.iter().rev().find(|n| {
-                    let sp = self.world_to_screen(center, n.pos);
-                    sp.distance(mouse) <= 24.0 * self.zoom
-                });
-                self.selected_node_id = hit.map(|n| n.id.clone());
+                self.selected_node_id = self.hit_test_node(center, mouse);
             }
         }
 
@@ -758,27 +957,102 @@ impl GraphCraftApp {
                 && (node.label.to_ascii_lowercase().contains(&query)
                     || node.id.to_ascii_lowercase().contains(&query));
 
-            if is_selected || is_in_path || matches_query {
-                let ring_color = if is_in_path {
-                    highlight_color
-                } else if matches_query {
-                    Color32::from_rgb(34, 197, 94)
-                } else {
-                    Color32::from_rgb(251, 191, 36)
-                };
-                painter.circle_stroke(sp, radius + 4.0 * self.zoom, Stroke::new(2.5, ring_color));
+            let ring_color = if is_in_path {
+                Some(highlight_color)
+            } else if matches_query {
+                Some(Color32::from_rgb(34, 197, 94))
+            } else if is_selected {
+                Some(Color32::from_rgb(251, 191, 36))
+            } else {
+                None
+            };
+
+            if node.kind == NodeKind::Drawer {
+                let card = self.drawer_screen_rect(sp, node);
+                let rounding = CornerRadius::same((6.0 * self.zoom).clamp(3.0, 10.0) as u8);
+                if let Some(rc) = ring_color {
+                    painter.rect_stroke(
+                        card.expand(4.0 * self.zoom),
+                        rounding,
+                        Stroke::new(2.5, rc),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+                painter.rect_filled(card, rounding, node_fill);
+                painter.rect_stroke(
+                    card,
+                    rounding,
+                    Stroke::new(2.2 * self.zoom.sqrt(), accent),
+                    egui::StrokeKind::Inside,
+                );
+
+                // Header bar
+                let header_h = 22.0 * self.zoom;
+                let header_rect = egui::Rect::from_min_max(
+                    card.min,
+                    Pos2::new(card.max.x, card.min.y + header_h),
+                );
+                let header_fill = Color32::from_rgba_unmultiplied(
+                    accent.r(),
+                    accent.g(),
+                    accent.b(),
+                    if self.light_mode { 40 } else { 55 },
+                );
+                painter.rect_filled(header_rect, rounding, header_fill);
+                painter.line_segment(
+                    [
+                        Pos2::new(card.min.x, header_rect.max.y),
+                        Pos2::new(card.max.x, header_rect.max.y),
+                    ],
+                    Stroke::new(1.0, accent),
+                );
+                painter.text(
+                    Pos2::new(card.min.x + 8.0 * self.zoom, header_rect.center().y),
+                    Align2::LEFT_CENTER,
+                    &node.label,
+                    FontId::proportional(11.5 * self.zoom.clamp(0.7, 1.35)),
+                    text_color,
+                );
+
+                // Multi-line items inside drawer
+                let lines = Self::drawer_lines(&node.notes);
+                let line_font = FontId::monospace(10.0 * self.zoom.clamp(0.65, 1.25));
+                let mut y = header_rect.max.y + 10.0 * self.zoom;
+                for line in lines.iter().take(8) {
+                    painter.text(
+                        Pos2::new(card.min.x + 10.0 * self.zoom, y),
+                        Align2::LEFT_CENTER,
+                        *line,
+                        line_font.clone(),
+                        text_color,
+                    );
+                    y += 14.5 * self.zoom;
+                }
+                if lines.len() > 8 {
+                    painter.text(
+                        Pos2::new(card.min.x + 10.0 * self.zoom, y),
+                        Align2::LEFT_CENTER,
+                        format!("... (+{} more)", lines.len() - 8),
+                        line_font,
+                        edge_label_color,
+                    );
+                }
+            } else {
+                if let Some(rc) = ring_color {
+                    painter.circle_stroke(sp, radius + 4.0 * self.zoom, Stroke::new(2.5, rc));
+                }
+
+                painter.circle_filled(sp, radius, node_fill);
+                painter.circle_stroke(sp, radius, Stroke::new(2.5 * self.zoom.sqrt(), accent));
+
+                painter.text(
+                    Pos2::new(sp.x, sp.y + radius + 12.0 * self.zoom),
+                    Align2::CENTER_CENTER,
+                    &node.label,
+                    FontId::proportional(12.5 * self.zoom.clamp(0.7, 1.4)),
+                    text_color,
+                );
             }
-
-            painter.circle_filled(sp, radius, node_fill);
-            painter.circle_stroke(sp, radius, Stroke::new(2.5 * self.zoom.sqrt(), accent));
-
-            painter.text(
-                Pos2::new(sp.x, sp.y + radius + 12.0 * self.zoom),
-                Align2::CENTER_CENTER,
-                &node.label,
-                FontId::proportional(12.5 * self.zoom.clamp(0.7, 1.4)),
-                text_color,
-            );
         }
     }
 
@@ -867,21 +1141,216 @@ impl GraphCraftApp {
         });
     }
 
-    fn render_help_view(&self, ui: &mut egui::Ui) {
-        ui.heading("GraphCraft Documentation & Architecture");
+    fn render_chat_view(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Chat");
         ui.separator();
-        ui.label("Pure-Rust Knowledge Graph, Network Analysis & Interactive Node Canvas.");
-        ui.add_space(8.0);
-        ui.strong("Architecture Layers:");
-        ui.label("- L1 (graphcraft-core): petgraph algorithms (PageRank, Dijkstra), physics layouts, DOT/Mermaid/GEXF export.");
-        ui.label("- L2 (graphcraft-mcp): CLI-first binary (`--json`) + pure JSON-RPC MCP 2024-11-05 stdio server.");
-        ui.label("- L3 (graphcraft-app): Pure-Rust eframe/egui native GPU desktop app calling L1 directly in-process.");
-        ui.add_space(8.0);
-        ui.strong("Controls:");
-        ui.label("- Drag background: Pan camera");
-        ui.label("- Drag node: Move node interactively");
-        ui.label("- Ctrl + Mouse Wheel: Zoom canvas / UI scale");
-        ui.label("- Ctrl + K: Open Command Palette");
+        ui.horizontal(|ui| {
+            ui.label("Model:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.chat_model)
+                    .hint_text("e.g. gemma4:12b (leave empty for local-only)"),
+            );
+        });
+        if self.chat_model.trim().is_empty() {
+            ui.colored_label(Color32::from_rgb(220, 38, 38), "no model selected");
+        } else {
+            ui.label(format!("Configured model: {}", self.chat_model.trim()));
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.chat_prompt)
+                    .hint_text("Ask about graph topology or layout..."),
+            );
+            if ui.button("Send").clicked() {
+                if self.chat_model.trim().is_empty() {
+                    self.chat_log
+                        .push("Error: no model selected. Enter a model name first.".into());
+                } else if !self.chat_prompt.trim().is_empty() {
+                    let prompt = self.chat_prompt.trim().to_string();
+                    self.chat_log.push(format!("> {prompt}"));
+                    self.chat_log.push(
+                        "Local graph summary: use the MCP server (`graphcraft-mcp mcp`) for external LLM tool calls."
+                            .into(),
+                    );
+                    self.chat_prompt.clear();
+                }
+            }
+        });
+        ui.separator();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for line in &self.chat_log {
+                ui.label(line);
+            }
+        });
+    }
+
+    fn render_help_view(&mut self, ui: &mut egui::Ui) {
+        let is_de = self.locale == AppLocale::Deutsch;
+        ui.heading(if is_de {
+            "GraphCraft Hilfe & Referenz"
+        } else {
+            "GraphCraft Help & Reference"
+        });
+        ui.add_space(4.0);
+
+        let tabs = if is_de {
+            [
+                "Erste Schritte",
+                "Canvas & Steuerung",
+                "Algorithmen & Layouts",
+                "CLI & MCP",
+                "Tastenkürzel & Tipps",
+                "Technik",
+            ]
+        } else {
+            [
+                "Get Started",
+                "Canvas & Controls",
+                "Algorithms & Layouts",
+                "CLI & MCP",
+                "Shortcuts & Tips",
+                "Technical Info",
+            ]
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            for (idx, label) in tabs.iter().enumerate() {
+                if ui.selectable_label(self.help_tab == idx, *label).clicked() {
+                    self.help_tab = idx;
+                }
+            }
+        });
+        ui.separator();
+
+        egui::ScrollArea::vertical().show(ui, |ui| match self.help_tab {
+            0 => {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.strong(if is_de {
+                        "Was ist GraphCraft?"
+                    } else {
+                        "What is this?"
+                    });
+                    ui.add_space(4.0);
+                    ui.label("GraphCraft is a personal knowledge-graph, brainstorming, and system-mapping studio - NOT a backoffice/ERP craft app (no invoices, payroll, or inventory).");
+                    ui.label("Use it to map ideas (Concepts), collaborators (People), repos (Projects), devices (Hardware), notes (Documents), and groups (Clusters) on an infinite canvas.");
+                    ui.add_space(6.0);
+                    ui.strong("How does it tie in?");
+                    ui.label("- Brainstorming -> Structure: Sketch nodes and typed relations visually, then untangle them with force-directed, circular, or grid layouts.");
+                    ui.label("- Network Analysis: Spot key hubs with PageRank centrality and trace dependencies with Dijkstra shortest-path queries.");
+                    ui.label("- Agent & Docs Integration: The same core engine powers the desktop app, CLI, and MCP stdio server (`graphcraft-mcp mcp`), and exports directly to Mermaid, DOT, GEXF 1.3, and JSON.");
+                    ui.add_space(6.0);
+                    ui.strong("Database Persistence");
+                    ui.label("Every Person, Concept, Project, Hardware, Document, Cluster, edge, and dragged position is saved automatically to your local SQLite database (`%LOCALAPPDATA%\\graphcraft\\graphcraft.db` or `--db <PATH>`).");
+                    if let Some(ref p) = self.db_path {
+                        ui.monospace(format!("Active DB: {}", p.display()));
+                    } else {
+                        ui.monospace("Active DB: in-memory (headless / smoke mode)");
+                    }
+                    ui.add_space(6.0);
+                    ui.strong("Workspace Layout & Theme");
+                    ui.label("- Left Sidebar: Switch tabs (Canvas, Nodes, Export, Chat, Help), filter nodes, add nodes/edges, and run shortest-path queries.");
+                    ui.label("- Center Panel: Interactive GPU canvas, node table, format exporter, or help.");
+                    ui.label("- Right Inspector: Edit the selected node's label, semantic kind, markdown notes, and incident edges.");
+                    ui.label("- View -> Dark / Light switches theme; View -> English / Deutsch switches UI language.");
+                });
+            }
+            1 => {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.strong("Interactive Canvas Controls");
+                    ui.add_space(4.0);
+                    ui.label("- Drag background: Pan camera across the infinite canvas.");
+                    ui.label("- Drag any node: Reposition the node directly in world space.");
+                    ui.label("- Click any node: Select it in the Right Inspector and highlight incident connections.");
+                    ui.label("- Ctrl + Mouse Wheel: Zoom canvas smoothly (25% to 350%).");
+                    ui.label("- View -> Reset Camera (Center): Reset pan and zoom to 100%.");
+                    ui.add_space(6.0);
+                    ui.strong("Visual Encoding");
+                    ui.label("- Node radius scales with PageRank centrality so hub nodes stand out immediately.");
+                    ui.label("- Node colors represent semantic kinds: Hardware, Project, Person, Cluster, Document, Concept.");
+                    ui.label("- Shortest-path results highlight the active route in bright amber.");
+                });
+            }
+            2 => {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.strong("Graph Algorithms (graphcraft-core / petgraph)");
+                    ui.add_space(4.0);
+                    ui.label("- PageRank Centrality: Iterative power-method ranking (default damping 0.85, 25 iterations).");
+                    ui.label("- Dijkstra Shortest Path: Weighted directed or undirected pathfinding between any two node IDs.");
+                    ui.label("- Topology Metrics: Connected components, cycle detection, and graph density.");
+                    ui.label("- Undo / Redo: 64-step snapshot stack across node/edge edits, layouts, and resets.");
+                    ui.add_space(6.0);
+                    ui.strong("Layout Engines & Export");
+                    ui.label("- Fruchterman-Reingold Force-Directed: Run 30-step bursts from Modify -> Run Force Physics or toggle Live Physics.");
+                    ui.label("- Deterministic Layouts: Circular and Grid layouts for clean structured overviews.");
+                    ui.label("- Export Formats: GraphCraft JSON, Graphviz DOT, Mermaid Flowchart (flowchart LR), and Gephi GEXF 1.3.");
+                });
+            }
+            3 => {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.strong("3-Tier Architecture & Automation");
+                    ui.add_space(4.0);
+                    ui.label("All mutations go through Command::dispatch in graphcraft-core (L1), shared by CLI/MCP (L2) and this desktop app (L3).");
+                    ui.add_space(6.0);
+                    ui.strong("PowerShell Launcher (repo root)");
+                    ui.monospace(".\\start.ps1                 # Build & launch desktop app");
+                    ui.monospace(".\\start.ps1 -Smoke          # Run headless floor, app & CLI smoke checks");
+                    ui.monospace(".\\start.ps1 -Cli status     # Query workspace status via CLI");
+                    ui.monospace(".\\start.ps1 -Cli stats      # Print topology statistics");
+                    ui.monospace(".\\start.ps1 -Cli pagerank   # Print PageRank centrality");
+                    ui.monospace(".\\start.ps1 -Cli path boomy storytold");
+                    ui.monospace(".\\start.ps1 -Cli export mermaid");
+                    ui.monospace(".\\start.ps1 -Mcp            # Start MCP 2024-11-05 JSON-RPC stdio server");
+                });
+            }
+            4 => {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.strong("Keyboard Shortcuts");
+                    ui.add_space(4.0);
+                    egui::Grid::new("help_shortcuts_grid")
+                        .num_columns(2)
+                        .spacing([20.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.monospace("Ctrl + K");
+                            ui.label("Open Command Palette");
+                            ui.end_row();
+                            ui.monospace("F1");
+                            ui.label("Open Help & Reference");
+                            ui.end_row();
+                            ui.monospace("Ctrl + Wheel");
+                            ui.label("Zoom canvas in/out");
+                            ui.end_row();
+                            ui.monospace("Primary Drag (Node)");
+                            ui.label("Move node interactively");
+                            ui.end_row();
+                            ui.monospace("Primary Drag (Canvas)");
+                            ui.label("Pan camera");
+                            ui.end_row();
+                        });
+                    ui.add_space(8.0);
+                    ui.strong("Tips");
+                    ui.label("- Use Live Physics briefly after adding several nodes, then turn it off to fine-tune positions manually.");
+                    ui.label("- Switch to the Export tab and select Mermaid to copy diagrams straight into markdown docs.");
+                });
+            }
+            _ => {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.strong("Graph Model: Labeled Property Graph (LPG)");
+                    ui.add_space(4.0);
+                    ui.label("GraphCraft implements a Labeled Property Graph (specifically a directed, weighted, heterogeneous multigraph), the same family used by Neo4j and knowledge-graph tools.");
+                    ui.add_space(6.0);
+                    ui.strong("Core Data Model");
+                    ui.label("- Engine Backing: petgraph::graph::DiGraph<String, f64> in graphcraft-core.");
+                    ui.label("- Node Kinds: Concept, Project, Person, Hardware, Document, Cluster (rendered as PageRank-scaled circles) and Drawer (rendered as a multi-line card, e.g. 'Backoffice apps').");
+                    ui.label("- Node Properties: id, label, kind, notes (multiline text), tags, metadata (key-value map), weight, and 2D world pos (x, y).");
+                    ui.label("- Edge Properties: id, source, target, typed relation string, and f32 weight.");
+                    ui.add_space(6.0);
+                    ui.strong("Storage & Protocol");
+                    ui.label("- Persistence: Bundled SQLite (rusqlite) storing workspace_meta, nodes, and edges.");
+                    ui.label("- Command Bus: All UI, CLI, and MCP 2024-11-05 JSON-RPC calls share Command::dispatch.");
+                });
+            }
+        });
     }
 }
 
@@ -905,6 +1374,9 @@ impl eframe::App for GraphCraftApp {
         // Ctrl + K shortcut for Command Palette
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::K)) {
             self.show_command_palette = !self.show_command_palette;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
+            self.active_tab = ActiveTab::Help;
         }
 
         egui::Panel::top("top_menu").show(ui, |ui| {
@@ -935,6 +1407,7 @@ impl eframe::App for GraphCraftApp {
             ActiveTab::Canvas => self.render_canvas(&ctx, ui),
             ActiveTab::Table => self.render_table_view(ui),
             ActiveTab::Export => self.render_export_view(ui),
+            ActiveTab::Chat => self.render_chat_view(ui),
             ActiveTab::Help => self.render_help_view(ui),
         });
 
@@ -949,6 +1422,23 @@ impl eframe::App for GraphCraftApp {
                     ui.label("Pure-Rust Knowledge Graph & Network Studio");
                     ui.label("Dual-licensed MIT OR Apache-2.0");
                     ui.label("Clean-room ArtCraft community beta candidate.");
+                });
+        }
+
+        if self.show_licenses {
+            egui::Window::new("Licenses")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(520.0)
+                .open(&mut self.show_licenses)
+                .show(&ctx, |ui| {
+                    ui.heading("GraphCraft Licenses & Attribution");
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            ui.label(include_str!("../../../ATTRIBUTION.md"));
+                        });
                 });
         }
 
@@ -1110,5 +1600,20 @@ mod tests {
             });
         });
         harness.run();
+    }
+
+    #[test]
+    fn headless_egui_kittest_help_tabs_render() {
+        let mut app = GraphCraftApp::new_headless();
+        for tab in 0..6 {
+            app.help_tab = tab;
+            let mut harness = Harness::new_ui(|ui| {
+                apply_theme(ui.ctx(), app.light_mode);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    app.render_help_view(ui);
+                });
+            });
+            harness.run();
+        }
     }
 }

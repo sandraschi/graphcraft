@@ -6,6 +6,7 @@
 #![deny(clippy::unimplemented)]
 
 pub mod algorithms;
+pub mod db;
 pub mod error;
 pub mod io;
 pub mod layout;
@@ -172,6 +173,26 @@ impl GraphEngine {
         self.snapshot_for_undo();
         self.doc = parsed;
         Ok(())
+    }
+
+    /// Opens an existing SQLite workspace database or seeds it with the demo graph on first run.
+    pub fn open_or_seed(db_path: &Path) -> Result<Self, GraphError> {
+        if let Some(doc) = db::load_from_db(db_path)? {
+            Ok(Self {
+                doc,
+                undo_stack: Vec::new(),
+                redo_stack: Vec::new(),
+            })
+        } else {
+            let engine = Self::new_with_demo();
+            db::save_to_db(&engine.doc, db_path)?;
+            Ok(engine)
+        }
+    }
+
+    /// Saves the current graph state into the given SQLite database path.
+    pub fn save_db(&self, db_path: &Path) -> Result<(), GraphError> {
+        db::save_to_db(&self.doc, db_path)
     }
 
     pub fn execute(&mut self, cmd: Command) -> Result<Value, GraphError> {
@@ -451,8 +472,8 @@ mod tests {
         let mut engine = GraphEngine::new_with_demo();
         let res = dispatch(&mut engine, Command::Status);
         assert_eq!(res["ok"], true);
-        assert_eq!(res["data"]["nodes"], 10);
-        assert_eq!(res["data"]["edges"], 12);
+        assert_eq!(res["data"]["nodes"], 12);
+        assert_eq!(res["data"]["edges"], 15);
     }
 
     #[test]
@@ -552,7 +573,7 @@ mod tests {
             },
         );
         assert_eq!(res["ok"], true);
-        assert_eq!(res["data"]["removed_incident_edges"], 3);
+        assert_eq!(res["data"]["removed_incident_edges"], 4);
         assert!(!engine
             .doc
             .edges
@@ -580,7 +601,7 @@ mod tests {
     fn pagerank_scores_sum_near_one() {
         let engine = GraphEngine::new_with_demo();
         let scores = compute_pagerank(&engine.doc, 0.85, 30);
-        assert_eq!(scores.len(), 10);
+        assert_eq!(scores.len(), 12);
         let total: f64 = scores.iter().map(|s| s.score).sum();
         assert!((total - 1.0).abs() < 0.05);
     }
@@ -696,7 +717,7 @@ mod tests {
 
         let reload = dispatch(&mut engine, Command::LoadDemoSeed);
         assert_eq!(reload["ok"], true);
-        assert_eq!(engine.doc.nodes.len(), 10);
+        assert_eq!(engine.doc.nodes.len(), 12);
     }
 
     #[test]
@@ -713,5 +734,56 @@ mod tests {
         let first = engine.doc.nodes[0].pos;
         let second = engine.doc.nodes[1].pos;
         assert!((first.x - second.x).abs() > 1.0 || (first.y - second.y).abs() > 1.0);
+    }
+
+    #[test]
+    fn sqlite_db_roundtrip_persists_person_and_concept() {
+        let db_path =
+            std::env::temp_dir().join(format!("graphcraft_db_test_{}.db", Uuid::new_v4().simple()));
+        let opened = GraphEngine::open_or_seed(&db_path);
+        assert!(opened.is_ok());
+        if let Ok(mut engine) = opened {
+            let r1 = dispatch(
+                &mut engine,
+                Command::AddNode {
+                    id: Some("ada".into()),
+                    label: "Ada Lovelace".into(),
+                    kind: Some(NodeKind::Person),
+                    notes: Some("First programmer".into()),
+                    tags: Some(vec!["math".into()]),
+                    x: Some(12.5),
+                    y: Some(-44.0),
+                },
+            );
+            assert_eq!(r1["ok"], true);
+            let r2 = dispatch(
+                &mut engine,
+                Command::AddNode {
+                    id: Some("analytical_engine".into()),
+                    label: "Analytical Engine".into(),
+                    kind: Some(NodeKind::Concept),
+                    notes: None,
+                    tags: None,
+                    x: None,
+                    y: None,
+                },
+            );
+            assert_eq!(r2["ok"], true);
+            assert!(engine.save_db(&db_path).is_ok());
+        }
+
+        let reopened_res = GraphEngine::open_or_seed(&db_path);
+        assert!(reopened_res.is_ok());
+        if let Ok(reopened) = reopened_res {
+            let ada = reopened.doc.nodes.iter().find(|n| n.id == "ada");
+            assert!(ada.is_some());
+            assert_eq!(ada.map(|n| n.kind), Some(NodeKind::Person));
+            assert!(reopened
+                .doc
+                .nodes
+                .iter()
+                .any(|n| n.id == "analytical_engine" && n.kind == NodeKind::Concept));
+        }
+        let _ = std::fs::remove_file(&db_path);
     }
 }

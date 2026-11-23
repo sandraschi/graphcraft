@@ -23,6 +23,10 @@ struct Cli {
     #[arg(long, global = true)]
     file: Option<PathBuf>,
 
+    /// Optional path to a GraphCraft SQLite database file
+    #[arg(long, global = true)]
+    db: Option<PathBuf>,
+
     /// Output compact or formatted JSON
     #[arg(long, global = true, default_value_t = false)]
     json: bool,
@@ -73,6 +77,7 @@ fn parse_kind(raw: &str) -> Option<NodeKind> {
         "hardware" => Some(NodeKind::Hardware),
         "document" => Some(NodeKind::Document),
         "cluster" => Some(NodeKind::Cluster),
+        "drawer" => Some(NodeKind::Drawer),
         _ => None,
     }
 }
@@ -92,7 +97,7 @@ fn mcp_tools_list() -> Value {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string" },
-                        "kind": { "type": "string", "enum": ["concept", "project", "person", "hardware", "document", "cluster"] }
+                        "kind": { "type": "string", "enum": ["concept", "project", "person", "hardware", "document", "cluster", "drawer"] }
                     }
                 }
             },
@@ -328,7 +333,7 @@ pub fn process_jsonrpc_line(engine: &mut GraphEngine, line: &str) -> Option<Valu
     Some(response)
 }
 
-fn run_mcp_stdio(engine: &mut GraphEngine) -> io::Result<()> {
+fn run_mcp_stdio(engine: &mut GraphEngine, db_path: Option<&std::path::Path>) -> io::Result<()> {
     eprintln!("graphcraft-mcp stdio server listening (protocol 2024-11-05)");
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
@@ -336,6 +341,11 @@ fn run_mcp_stdio(engine: &mut GraphEngine) -> io::Result<()> {
     for line_res in stdin.lock().lines() {
         let line = line_res?;
         if let Some(resp) = process_jsonrpc_line(engine, &line) {
+            if let Some(path) = db_path {
+                if let Err(err) = engine.save_db(path) {
+                    eprintln!("Failed to persist db {}: {err}", path.display());
+                }
+            }
             let serialized = serde_json::to_string(&resp)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             writeln!(stdout, "{serialized}")?;
@@ -347,7 +357,17 @@ fn run_mcp_stdio(engine: &mut GraphEngine) -> io::Result<()> {
 
 fn main() {
     let cli = Cli::parse();
-    let mut engine = GraphEngine::new_with_demo();
+    let db_path = cli
+        .db
+        .clone()
+        .unwrap_or_else(graphcraft_core::db::default_db_path);
+    let mut engine = match GraphEngine::open_or_seed(&db_path) {
+        Ok(eng) => eng,
+        Err(err) => {
+            eprintln!("Failed to open db {}: {err}", db_path.display());
+            GraphEngine::new_with_demo()
+        }
+    };
 
     if let Some(path) = cli.file.as_ref() {
         if let Err(err) = engine.load_from_file(path) {
@@ -357,7 +377,12 @@ fn main() {
     }
 
     if let CliCommand::Mcp = cli.command {
-        if let Err(err) = run_mcp_stdio(&mut engine) {
+        let save_target = if cli.file.is_some() {
+            None
+        } else {
+            Some(db_path.as_path())
+        };
+        if let Err(err) = run_mcp_stdio(&mut engine, save_target) {
             eprintln!("MCP stdio error: {err}");
             std::process::exit(1);
         }

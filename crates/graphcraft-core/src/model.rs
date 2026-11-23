@@ -12,6 +12,7 @@ pub enum NodeKind {
     Hardware,
     Document,
     Cluster,
+    Drawer,
 }
 
 impl NodeKind {
@@ -23,6 +24,7 @@ impl NodeKind {
             Self::Hardware,
             Self::Document,
             Self::Cluster,
+            Self::Drawer,
         ]
     }
 
@@ -34,6 +36,7 @@ impl NodeKind {
             Self::Hardware => "Hardware",
             Self::Document => "Document",
             Self::Cluster => "Cluster",
+            Self::Drawer => "Drawer",
         }
     }
 }
@@ -205,6 +208,26 @@ pub fn demo_seed_document() -> GraphDocument {
             weight: 1.6,
             metadata: BTreeMap::new(),
         },
+        GraphNode {
+            id: "backoffice_apps".into(),
+            label: "Backoffice apps".into(),
+            kind: NodeKind::Drawer,
+            notes: "buchcraft\nteamcraft\ncontractcraft\ndeskcraft\nassetcraft\nbillcraft\nspendcraft\nhirecraft\nformcraft\nwikicraft\nhelmcraft\ngaincraft\ntaskcraft\nmoneycraft\nshopcraft\nstockcraft".into(),
+            tags: vec!["backoffice".into(), "craft-biz".into(), "drawer".into()],
+            pos: Vec2Pos::new(-280.0, -20.0),
+            weight: 1.4,
+            metadata: BTreeMap::new(),
+        },
+        GraphNode {
+            id: "smbcraft".into(),
+            label: "SMBCraft Umbrella".into(),
+            kind: NodeKind::Project,
+            notes: "Proposed Storytold Beta umbrella bundling the backoffice craft apps (Finance: billcraft/spendcraft/buchcraft; Ops: contractcraft/taskcraft/teamcraft; CRM: gaincraft) on craft-biz + SQLite.".into(),
+            tags: vec!["smbcraft".into(), "umbrella".into(), "storytold".into()],
+            pos: Vec2Pos::new(-110.0, 140.0),
+            weight: 1.8,
+            metadata: BTreeMap::new(),
+        },
     ];
 
     let edges = vec![
@@ -291,6 +314,27 @@ pub fn demo_seed_document() -> GraphDocument {
             target: "jeeves".into(),
             relation: "strategizes_moat".into(),
             weight: 1.5,
+        },
+        GraphEdge {
+            id: "e13".into(),
+            source: "sandra".into(),
+            target: "backoffice_apps".into(),
+            relation: "maintains".into(),
+            weight: 1.6,
+        },
+        GraphEdge {
+            id: "e14".into(),
+            source: "backoffice_apps".into(),
+            target: "smbcraft".into(),
+            relation: "bundles_into".into(),
+            weight: 1.9,
+        },
+        GraphEdge {
+            id: "e15".into(),
+            source: "smbcraft".into(),
+            target: "storytold".into(),
+            relation: "targets_beta".into(),
+            weight: 1.8,
         },
     ];
 

@@ -21,6 +21,15 @@ pub enum GraphError {
     #[error("IO error: {0}")]
     Io(String),
 
+    #[error("Database error: {0}")]
+    Database(String),
+
     #[error("Feature not implemented yet: {0}")]
     NotImplemented(String),
+}
+
+impl From<rusqlite::Error> for GraphError {
+    fn from(err: rusqlite::Error) -> Self {
+        Self::Database(err.to_string())
+    }
 }

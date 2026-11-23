@@ -46,11 +46,41 @@ fn run_smoke() -> i32 {
     0
 }
 
+fn print_help() {
+    println!(
+        "graphcraft-app {}\n\nUSAGE:\n    graphcraft-app [OPTIONS]\n\nOPTIONS:\n    --db <PATH>              SQLite database path (default: per-user app data dir)\n    --smoke, --smoke-test    Run headless smoke checks and exit\n    -h, --help               Print this help message and exit\n    -V, --version            Print version and exit",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+fn parse_db_arg(args: &[String]) -> Option<std::path::PathBuf> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--db" {
+            return iter.next().map(std::path::PathBuf::from);
+        }
+        if let Some(rest) = arg.strip_prefix("--db=") {
+            return Some(std::path::PathBuf::from(rest));
+        }
+    }
+    None
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print_help();
+        return;
+    }
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("graphcraft-app {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if args.iter().any(|a| a == "--smoke" || a == "--smoke-test") {
         std::process::exit(run_smoke());
     }
+
+    let db_path = parse_db_arg(&args).unwrap_or_else(graphcraft_core::db::default_db_path);
 
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -63,7 +93,7 @@ fn main() {
     if let Err(err) = eframe::run_native(
         "GraphCraft",
         native_options,
-        Box::new(|cc| Ok(Box::new(GraphCraftApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(GraphCraftApp::new_with_db(cc, db_path)))),
     ) {
         eprintln!("Failed to launch GraphCraft UI: {err}");
         std::process::exit(1);
