@@ -1300,7 +1300,7 @@ impl GraphCraftApp {
                     ui.monospace(".\\start.ps1 -Cli pagerank   # Print PageRank centrality");
                     ui.monospace(".\\start.ps1 -Cli path boomy storytold");
                     ui.monospace(".\\start.ps1 -Cli export mermaid");
-                    ui.monospace(".\\start.ps1 -Mcp            # Start MCP 2024-11-05 JSON-RPC stdio server");
+                    ui.monospace(".\\start.ps1 -Mcp            # Start MCP 2026-07-28 JSON-RPC stdio server");
                 });
             }
             4 => {
@@ -1347,7 +1347,7 @@ impl GraphCraftApp {
                     ui.add_space(6.0);
                     ui.strong("Storage & Protocol");
                     ui.label("- Persistence: Bundled SQLite (rusqlite) storing workspace_meta, nodes, and edges.");
-                    ui.label("- Command Bus: All UI, CLI, and MCP 2024-11-05 JSON-RPC calls share Command::dispatch.");
+                    ui.label("- Command Bus: All UI, CLI, and MCP 2026-07-28 JSON-RPC calls share Command::dispatch.");
                 });
             }
         });

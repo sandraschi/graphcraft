@@ -65,7 +65,7 @@ enum CliCommand {
         #[arg(default_value = "mermaid")]
         format: String,
     },
-    /// Run pure JSON-RPC MCP 2024-11-05 server over stdio
+    /// Run pure JSON-RPC MCP 2026-07-28 server over stdio
     Mcp,
 }
 
@@ -292,7 +292,7 @@ pub fn process_jsonrpc_line(engine: &mut GraphEngine, line: &str) -> Option<Valu
             "jsonrpc": "2.0",
             "id": req_id,
             "result": {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": "2026-07-28",
                 "capabilities": { "tools": {} },
                 "serverInfo": {
                     "name": "graphcraft-mcp",
@@ -334,7 +334,7 @@ pub fn process_jsonrpc_line(engine: &mut GraphEngine, line: &str) -> Option<Valu
 }
 
 fn run_mcp_stdio(engine: &mut GraphEngine, db_path: Option<&std::path::Path>) -> io::Result<()> {
-    eprintln!("graphcraft-mcp stdio server listening (protocol 2024-11-05)");
+    eprintln!("graphcraft-mcp stdio server listening (protocol 2026-07-28)");
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
 
@@ -434,7 +434,7 @@ mod tests {
         let init_resp = process_jsonrpc_line(&mut engine, init_req);
         assert!(init_resp.is_some());
         if let Some(v) = init_resp {
-            assert_eq!(v["result"]["protocolVersion"], "2024-11-05");
+            assert_eq!(v["result"]["protocolVersion"], "2026-07-28");
             assert_eq!(v["result"]["serverInfo"]["name"], "graphcraft-mcp");
         }
 

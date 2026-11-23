@@ -21,7 +21,7 @@ Launch from the repository root with `.\start.ps1` (or double-click `start.bat`)
 ## Functions
 
 - **L1 (`graphcraft-core`)**: In-memory `petgraph` model, iterative PageRank centrality, Dijkstra weighted shortest path, cycle detection, component count, density, Fruchterman-Reingold force-directed / circular / grid layouts, 64-step undo/redo stack, and JSON / Graphviz DOT / Mermaid / GEXF 1.3 exporters. All mutations go through `Command::dispatch`.
-- **L2 (`graphcraft-mcp`)**: CLI-first binary (`--json`) and pure JSON-RPC `MCP 2024-11-05` stdio server sharing `Command::dispatch`.
+- **L2 (`graphcraft-mcp`)**: CLI-first binary (`--json`) and pure JSON-RPC `MCP 2026-07-28` stdio server sharing `Command::dispatch`.
 - **L3 (`graphcraft-app`)**: Native `eframe`/`egui` GPU desktop workbench calling `graphcraft-core` directly in-process.
 - **Chat**: Local assistant panel in the `Chat` tab. Enter a model name before sending; an empty model displays `no model selected` and makes no network calls.
 

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "L2 CLI-first binary and MCP 2024-11-05 stdio server for GraphCraft."
+description = "L2 CLI-first binary and MCP 2026-07-28 stdio server for GraphCraft."
 
 [lints]
 workspace = true

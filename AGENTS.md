@@ -68,7 +68,7 @@ The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are used as in RFC 2119
 
 `graphcraft` is a standalone Pure-Rust ArtCraft desktop application and MCP server following the 3-tier workspace seam:
 - `crates/graphcraft-core` (L1: engine, `petgraph` algorithms, layouts, exports, `Command::dispatch`)
-- `crates/graphcraft-mcp` (L2: `clap` CLI + JSON-RPC `MCP 2024-11-05` stdio server)
+- `crates/graphcraft-mcp` (L2: `clap` CLI + JSON-RPC `MCP 2026-07-28` stdio server)
 - `crates/graphcraft-app` (L3: `eframe`/`egui` native desktop studio)
 
 ## Hard Rules
