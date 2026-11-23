@@ -14,3 +14,10 @@ with the Storytold `craft-contrib` SPDX allowlist (`MIT`, `Apache-2.0`, `BSD-2-C
 | `thiserror` | MIT / Apache-2.0 | Ergonomic typed domain error handling |
 | `uuid` | MIT / Apache-2.0 | Stable node and edge identifiers |
 | `chrono` | MIT / Apache-2.0 | Timestamp generation for snapshots and exports |
+| `rusqlite` | MIT | Bundled SQLite persistence for nodes, edges, and layouts |
+
+## Asset Provenance
+
+| Asset | Author | Source | Licence | Notes |
+|---|---|---|---|---|
+| `assets/graph.svg` | GraphCraft contributors | Original procedural vector graph emblem | MIT OR Apache-2.0 | App emblem / domain asset |
