@@ -10,6 +10,7 @@ description = "L3 pure-Rust egui/eframe native GPU desktop application for Graph
 workspace = true
 
 [dependencies]
+craft-ai-ui = { path = "../../../aicraft/crates/craft-ai-ui" }
 graphcraft-core = { path = "../graphcraft-core" }
 eframe.workspace = true
 serde.workspace = true

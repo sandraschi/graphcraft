@@ -1,3 +1,5 @@
+use crate::chat;
+use craft_ai_ui::LlmSettingsPanel;
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Sense, Stroke, Vec2};
 use graphcraft_core::algorithms::{
     compute_pagerank, compute_stats, find_shortest_path, GraphStats,
@@ -7,6 +9,7 @@ use graphcraft_core::model::NodeKind;
 use graphcraft_core::{dispatch, Command, GraphEngine};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveTab {
@@ -29,6 +32,7 @@ pub struct GraphCraftApp {
     active_tab: ActiveTab,
     camera_offset: Vec2,
     zoom: f32,
+    ui_zoom: f32,
     selected_node_id: Option<String>,
     dragging_node_id: Option<String>,
     physics_running: bool,
@@ -65,9 +69,12 @@ pub struct GraphCraftApp {
     show_shortcuts: bool,
     show_command_palette: bool,
     palette_filter: String,
-    chat_model: String,
+    show_llm_settings: bool,
+    llm_settings: LlmSettingsPanel,
     chat_prompt: String,
-    chat_log: Vec<String>,
+    chat_history: Vec<(String, String)>,
+    chat_busy: bool,
+    chat_rx: Option<Receiver<Result<(String, u128), String>>>,
 }
 
 impl GraphCraftApp {
@@ -109,6 +116,7 @@ impl GraphCraftApp {
             active_tab: ActiveTab::Canvas,
             camera_offset: Vec2::ZERO,
             zoom: 1.0,
+            ui_zoom: 1.0,
             selected_node_id: Some("saschirob".into()),
             dragging_node_id: None,
             physics_running: false,
@@ -135,9 +143,12 @@ impl GraphCraftApp {
             show_shortcuts: false,
             show_command_palette: false,
             palette_filter: String::new(),
-            chat_model: String::new(),
+            show_llm_settings: false,
+            llm_settings: LlmSettingsPanel::new("graphcraft"),
             chat_prompt: String::new(),
-            chat_log: Vec::new(),
+            chat_history: Vec::new(),
+            chat_busy: false,
+            chat_rx: None,
         }
     }
 
@@ -484,6 +495,10 @@ impl GraphCraftApp {
                 }
                 if ui.button("Chat").clicked() {
                     self.active_tab = ActiveTab::Chat;
+                    ui.close();
+                }
+                if ui.button("LLM Settings...").clicked() {
+                    self.show_llm_settings = true;
                     ui.close();
                 }
                 if ui.button("Help").clicked() {
@@ -1141,46 +1156,159 @@ impl GraphCraftApp {
         });
     }
 
-    fn render_chat_view(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Chat");
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label("Model:");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.chat_model)
-                    .hint_text("e.g. gemma4:12b (leave empty for local-only)"),
-            );
-        });
-        if self.chat_model.trim().is_empty() {
-            ui.colored_label(Color32::from_rgb(220, 38, 38), "no model selected");
-        } else {
-            ui.label(format!("Configured model: {}", self.chat_model.trim()));
+    fn build_chat_context(&self) -> String {
+        let top_hubs: Vec<String> = self
+            .stats
+            .top_pagerank
+            .iter()
+            .take(5)
+            .map(|s| format!("{} ({:.3})", s.id, s.score))
+            .collect();
+        let selected = self.selected_node_id.as_deref().unwrap_or("(none)");
+        format!(
+            "Title: {} | Nodes: {} | Edges: {} | Density: {:.3} | Components: {} | Has cycles: {} | Selected node: {} | Top PageRank: {}",
+            self.engine.doc.title,
+            self.stats.node_count,
+            self.stats.edge_count,
+            self.stats.density,
+            self.stats.connected_components,
+            self.stats.has_cycles,
+            selected,
+            if top_hubs.is_empty() {
+                "none".to_string()
+            } else {
+                top_hubs.join(", ")
+            }
+        )
+    }
+
+    fn poll_chat(&mut self, ctx: &egui::Context) {
+        if self.chat_busy {
+            ctx.request_repaint();
         }
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.chat_prompt)
-                    .hint_text("Ask about graph topology or layout..."),
-            );
-            if ui.button("Send").clicked() {
-                if self.chat_model.trim().is_empty() {
-                    self.chat_log
-                        .push("Error: no model selected. Enter a model name first.".into());
-                } else if !self.chat_prompt.trim().is_empty() {
-                    let prompt = self.chat_prompt.trim().to_string();
-                    self.chat_log.push(format!("> {prompt}"));
-                    self.chat_log.push(
-                        "Local graph summary: use the MCP server (`graphcraft-mcp mcp`) for external LLM tool calls."
-                            .into(),
-                    );
-                    self.chat_prompt.clear();
+        let Some(rx) = self.chat_rx.as_ref() else {
+            return;
+        };
+        if let Ok(result) = rx.try_recv() {
+            self.chat_rx = None;
+            self.chat_busy = false;
+            match result {
+                Ok((reply, ms)) => {
+                    self.chat_history.push(("assistant".to_string(), reply));
+                    self.status_message = format!("LLM reply received in {ms} ms");
+                }
+                Err(err) => {
+                    self.chat_history
+                        .push(("error".to_string(), format!("LLM error: {err}")));
+                    self.status_message = format!("LLM error: {err}");
                 }
             }
+        }
+    }
+
+    fn send_chat_prompt(&mut self, prompt: String) {
+        if self.chat_busy {
+            return;
+        }
+        self.chat_history.push(("user".to_string(), prompt));
+        let history_for_llm: Vec<(String, String)> = self
+            .chat_history
+            .iter()
+            .filter(|(role, _)| role == "user" || role == "assistant")
+            .cloned()
+            .collect();
+        let workspace_context = self.build_chat_context();
+        let (tx, rx) = mpsc::channel();
+        self.chat_rx = Some(rx);
+        self.chat_busy = true;
+        self.status_message = "Waiting for LLM reply...".into();
+        std::thread::spawn(move || {
+            let res = chat::complete_graph_chat(&workspace_context, &history_for_llm);
+            let _ = tx.send(res);
         });
+    }
+
+    fn render_chat_view(&mut self, ui: &mut egui::Ui) {
+        let (summary, has_model) = chat::active_summary();
+        ui.horizontal(|ui| {
+            ui.heading("Assistant");
+            ui.separator();
+            ui.monospace(&summary);
+            if ui.button("LLM Settings...").clicked() {
+                self.show_llm_settings = true;
+            }
+            if ui
+                .add_enabled(!self.chat_history.is_empty(), egui::Button::new("Clear"))
+                .clicked()
+            {
+                self.chat_history.clear();
+            }
+            if self.chat_busy {
+                ui.spinner();
+                ui.label("Thinking...");
+            }
+        });
+        if !has_model {
+            let warn_color = if self.light_mode {
+                Color32::from_rgb(185, 28, 28)
+            } else {
+                Color32::from_rgb(248, 113, 113)
+            };
+            ui.colored_label(
+                warn_color,
+                "No model selected in ~/.craft/ai_config.json -- click LLM Settings... to configure Ollama, LM Studio, or a cloud provider.",
+            );
+        }
         ui.separator();
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for line in &self.chat_log {
-                ui.label(line);
+
+        let scroll_h = (ui.available_height() - 48.0).max(120.0);
+        egui::ScrollArea::vertical()
+            .id_salt("graphcraft_chat_scroll")
+            .max_height(scroll_h)
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                if self.chat_history.is_empty() {
+                    ui.label("Ask about graph topology, PageRank hubs, shortest paths, or layout strategy.");
+                }
+                for (role, text) in &self.chat_history {
+                    ui.group(|ui| {
+                        let speaker = match role.as_str() {
+                            "user" => "You",
+                            "assistant" => "Assistant",
+                            _ => "Error",
+                        };
+                        if role == "error" {
+                            let err_color = if self.light_mode {
+                                Color32::from_rgb(185, 28, 28)
+                            } else {
+                                Color32::from_rgb(248, 113, 113)
+                            };
+                            ui.colored_label(err_color, speaker);
+                            ui.colored_label(err_color, text);
+                        } else {
+                            ui.strong(speaker);
+                            ui.label(text);
+                        }
+                    });
+                }
+            });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            let response = ui.add_enabled(
+                !self.chat_busy,
+                egui::TextEdit::singleline(&mut self.chat_prompt)
+                    .desired_width((ui.available_width() - 80.0).max(160.0))
+                    .hint_text("Ask about graph topology or layout..."),
+            );
+            let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let clicked = ui
+                .add_enabled(!self.chat_busy, egui::Button::new("Send"))
+                .clicked();
+            if (clicked || enter) && !self.chat_prompt.trim().is_empty() {
+                let prompt = self.chat_prompt.trim().to_string();
+                self.chat_prompt.clear();
+                self.send_chat_prompt(prompt);
             }
         });
     }
@@ -1357,8 +1485,9 @@ impl GraphCraftApp {
 impl eframe::App for GraphCraftApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.poll_chat(&ctx);
 
-        // Ctrl + Mouse Wheel zoom (Craft Fleet Rule)
+        // Ctrl + Mouse Wheel zoom (Craft Fleet Rule: canvas zoom on Canvas tab, UI zoom elsewhere)
         let scroll_zoom = ctx.input(|i| {
             if i.modifiers.ctrl {
                 i.smooth_scroll_delta.y
@@ -1367,8 +1496,26 @@ impl eframe::App for GraphCraftApp {
             }
         });
         if scroll_zoom.abs() > 0.1 {
-            let factor = if scroll_zoom > 0.0 { 1.08 } else { 0.92 };
-            self.zoom = (self.zoom * factor).clamp(0.25, 3.5);
+            if self.active_tab == ActiveTab::Canvas {
+                let factor = if scroll_zoom > 0.0 { 1.08 } else { 0.92 };
+                self.zoom = (self.zoom * factor).clamp(0.25, 3.5);
+            } else {
+                let step = if scroll_zoom > 0.0 { 0.1 } else { -0.1 };
+                self.ui_zoom = (self.ui_zoom + step).clamp(0.75, 1.75);
+                ctx.set_zoom_factor(self.ui_zoom);
+            }
+        }
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Plus)) {
+            self.ui_zoom = (self.ui_zoom + 0.1).clamp(0.75, 1.75);
+            ctx.set_zoom_factor(self.ui_zoom);
+        }
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Minus)) {
+            self.ui_zoom = (self.ui_zoom - 0.1).clamp(0.75, 1.75);
+            ctx.set_zoom_factor(self.ui_zoom);
+        }
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Num0)) {
+            self.ui_zoom = 1.0;
+            ctx.set_zoom_factor(self.ui_zoom);
         }
 
         // Ctrl + K shortcut for Command Palette
@@ -1442,6 +1589,23 @@ impl eframe::App for GraphCraftApp {
                 });
         }
 
+        if self.show_llm_settings {
+            let mut open = self.show_llm_settings;
+            egui::Window::new("LLM Settings")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(560.0)
+                .open(&mut open)
+                .show(&ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("graphcraft_llm_settings_scroll")
+                        .show(ui, |ui| {
+                            self.llm_settings.render(ui, !self.light_mode);
+                        });
+                });
+            self.show_llm_settings = open;
+        }
+
         if self.show_shortcuts {
             egui::Window::new("Keyboard Shortcuts")
                 .collapsible(false)
@@ -1449,7 +1613,9 @@ impl eframe::App for GraphCraftApp {
                 .open(&mut self.show_shortcuts)
                 .show(&ctx, |ui| {
                     ui.label("Ctrl + K : Command Palette");
-                    ui.label("Ctrl + Scroll : Zoom Canvas");
+                    ui.label("F1 : Open Help");
+                    ui.label("Ctrl + Scroll : Zoom Canvas (on Canvas) / Zoom UI (other tabs)");
+                    ui.label("Ctrl + Plus / Minus / 0 : Zoom UI In / Out / Reset");
                     ui.label("Primary Drag (Node) : Move Node");
                     ui.label("Primary Drag (Canvas) : Pan Camera");
                 });
@@ -1472,6 +1638,8 @@ impl eframe::App for GraphCraftApp {
                         ("Toggle Light/Dark Theme", "toggle_theme"),
                         ("Load Vienna Demo Graph", "load_demo"),
                         ("Open Export View", "open_export"),
+                        ("Open Chat Assistant", "open_chat"),
+                        ("Open LLM Settings", "open_llm_settings"),
                     ];
                     let pf = self.palette_filter.to_ascii_lowercase();
                     for (label, code) in actions {
@@ -1508,6 +1676,12 @@ impl eframe::App for GraphCraftApp {
                                 "open_export" => {
                                     self.active_tab = ActiveTab::Export;
                                     self.refresh_export_preview();
+                                }
+                                "open_chat" => {
+                                    self.active_tab = ActiveTab::Chat;
+                                }
+                                "open_llm_settings" => {
+                                    self.show_llm_settings = true;
                                 }
                                 _ => {}
                             }
@@ -1615,5 +1789,28 @@ mod tests {
             });
             harness.run();
         }
+    }
+
+    #[test]
+    fn headless_egui_kittest_chat_and_llm_settings_render() {
+        let mut app = GraphCraftApp::new_headless();
+        let mut chat_harness = Harness::new_ui(|ui| {
+            apply_theme(ui.ctx(), app.light_mode);
+            egui::CentralPanel::default().show(ui, |ui| {
+                app.render_chat_view(ui);
+            });
+        });
+        chat_harness.run();
+        drop(chat_harness);
+
+        let mut llm_harness = egui_kittest::HarnessBuilder::default()
+            .with_accessibility_check(false)
+            .build_ui(|ui| {
+                apply_theme(ui.ctx(), app.light_mode);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    app.llm_settings.render(ui, !app.light_mode);
+                });
+            });
+        llm_harness.run();
     }
 }

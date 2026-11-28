@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Wired shared `craft-ai-ui` (`LlmSettingsPanel` + async `complete_live`) into `graphcraft-app` (`Chat` tab, `Window > LLM Settings...`, and `Ctrl+K` Command Palette) backed by `~/.craft/ai_config.json`.
+- Added `ctx.set_zoom_factor` UI zoom (`Ctrl + Wheel` outside canvas, `Ctrl + Plus / Minus / 0`).
+
 ## [0.1.0] - 2026-11-22
 
 ### Added

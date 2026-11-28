@@ -6,6 +6,7 @@
 #![deny(clippy::unimplemented)]
 
 mod app;
+mod chat;
 
 use app::GraphCraftApp;
 use graphcraft_core::{dispatch, Command, GraphEngine};
